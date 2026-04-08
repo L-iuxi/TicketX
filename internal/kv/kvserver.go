@@ -2,6 +2,7 @@ package kv
 
 import (
 	"TicketX/internal/raft"
+	"TicketX/internal/rpc"
 	"sync"
 )
 
@@ -133,13 +134,17 @@ func (kv *KvServer) applyLoop() {
 	}
 }
 
-func MakeKVServer() *KvServer {
+func (kv *KvServer) GetRaft() *raft.Raft {
+	return kv.rf
+}
+func MakeKVServer(peers []*rpc.ClientEnd, me int) *KvServer {
 	applych := make(chan raft.ApplyMsg)
+	persister := rpc.MakePersister()
 
 	kv := &KvServer{}
 	kv.kv = make(map[string]string)
 	kv.applyCh = applych
-	kv.rf = raft.MakeRaft(applych)
+	kv.rf = raft.MakeRaft(applych, peers, me, persister)
 	kv.waitCh = make(map[int]chan result)
 	kv.lastRequest = make(map[int]int)
 	kv.getCh = make(map[int]chan result)
