@@ -5,6 +5,7 @@ import (
 	"TicketX/internal/labrpc"
 	"TicketX/internal/persister"
 	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -505,14 +506,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := rf.getLastIndex() + 1 //日志编号
 	isleader := true
 
-	//fmt.Println("我受到了请求", command)
+	fmt.Println("我受到了请求", command)
 
 	if rf.states != Leader {
 		isleader = false
-		//fmt.Println("我不是leader", command)
+		fmt.Println("我不是leader", command)
 		return -1, term, isleader
 	} //不是leader不复制
-	//fmt.Println("我是leader", command)
+	fmt.Println("我是leader", command)
 	newcomm := LogEntry{
 		Term:    rf.term,
 		Command: command,
@@ -645,7 +646,7 @@ func (rf *Raft) ApplyLoop() {
 		rf.mu.Lock()
 		if rf.lastApply < rf.commitIndex { //提交从commitindex到lastapply这个区间的日志
 			rf.lastApply++
-			//fmt.Println("我要提交日志")
+			fmt.Println("我要提交日志")
 			msg := ApplyMsg{
 				CommandValid: true,
 				CommandIndex: rf.lastApply,

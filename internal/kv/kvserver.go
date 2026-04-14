@@ -1,11 +1,13 @@
 package kv
 
 import (
+	mysql "TicketX/internal/db"
 	"TicketX/internal/labgob"
 	"TicketX/internal/labrpc"
 	"TicketX/internal/persister"
 	"TicketX/internal/raft"
 	"TicketX/internal/rpc"
+	"fmt"
 	"sync"
 )
 
@@ -26,6 +28,7 @@ type KvServer struct {
 
 	lastRequest map[int]int //请求者对应的最后一个请求编号
 	rf          *raft.Raft
+	db          *mysql.DB
 }
 
 type OpType string
@@ -109,12 +112,42 @@ func (kv *KvServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 func (kv *KvServer) GetRaft() *raft.Raft {
 	return kv.rf
 }
+func (kv *KvServer) LoadTrainDataFromDB() error {
+	// 查询 train_inventory 表，获取所有车次和票数
+	rows, err := kv.db.Conn().Query("SELECT train_id, date, tickets FROM train_inventory")
+	if err != nil {
+		return fmt.Errorf("Error loading train data from MySQL: %v", err)
+	}
+	defer rows.Close()
 
-func MakeKVServer(peers []*labrpc.ClientEnd, me int) *KvServer {
+	for rows.Next() {
+		var trainID, date string
+		var tickets int
+		if err := rows.Scan(&trainID, &date, &tickets); err != nil {
+			return fmt.Errorf("Error scanning row: %v", err)
+		}
+
+		// 构造 Key 和 Value
+		key := trainID + ":" + date
+		value := fmt.Sprintf("%d", tickets)
+
+		// 将数据存入内存中的 kv 存储
+		kv.kv[key] = value
+		//fmt.Println("已初始化kv%s %s", key, value)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("Error reading rows: %v", err)
+	}
+	return nil
+}
+func MakeKVServer(peers []*labrpc.ClientEnd, me int, db *mysql.DB) *KvServer {
 	applych := make(chan raft.ApplyMsg)
 	persister := persister.MakePersister()
+
 	labgob.Register(Op{})
 	kv := &KvServer{}
+	kv.db = db
 	kv.kv = make(map[string]string)
 	kv.applyCh = applych
 	kv.rf = raft.MakeRaft(applych, peers, me, persister)

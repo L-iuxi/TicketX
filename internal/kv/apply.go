@@ -1,5 +1,7 @@
 package kv
 
+import "fmt"
+
 // 接受管道来到msg并执行
 func (kv *KvServer) applyLoop() {
 
@@ -17,6 +19,7 @@ func (kv *KvServer) applyLoop() {
 				} else { //未重复请求执行并记录
 					kv.kv[op.Key] = op.Value
 					kv.lastRequest[op.ClientId] = op.RequestId
+					fmt.Printf("健 %s 值 %s", op.Key, op.Value)
 
 				}
 				//返回结果给put
