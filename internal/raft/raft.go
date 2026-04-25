@@ -3,9 +3,12 @@ package raft
 import (
 	"TicketX/internal/labgob"
 	"TicketX/internal/persister"
+	types "TicketX/internal/type"
+	"TicketX/internal/wal"
 	"TicketX/proto"
 	"bytes"
 	"context"
+
 	"math/rand"
 	"sync"
 	"time"
@@ -35,11 +38,6 @@ const (
 	Follower  State = "Follower"
 )
 
-type LogEntry struct {
-	Term    int32
-	Command []byte
-}
-
 // Raft结构体
 type Raft struct {
 	mu            sync.Mutex
@@ -50,7 +48,7 @@ type Raft struct {
 	term          int32                //当前任期号
 	vote          int32                //投票给
 	persister     *persister.Persister // 持久化状态的对象，用来保存Raft状态，以便在崩溃和重启后恢复
-	log           []LogEntry           //日志
+	log           []types.LogEntry     //日志
 	nowLeader     int64
 	lastHeartbeat time.Time
 
@@ -64,6 +62,7 @@ type Raft struct {
 	lastSnapTerm     int32         //上次截断日志的任期
 	matchIndex       []int32
 	snap             []byte
+	wal              *wal.Wal
 
 	proto.UnimplementedRaftServer
 }
@@ -85,7 +84,7 @@ type RequestVoteReply struct {
 type HeartbeatArgs struct {
 	LeaderId          int32
 	LeaderTerm        int32
-	Entries           []LogEntry
+	Entries           []types.LogEntry
 	PreLogIndex       int32 //最后对齐位置
 	PreLogTerm        int32 //最后对齐位置的任期
 	LeaderCommitIndex int32
@@ -118,6 +117,15 @@ func (rf *Raft) LastHeartbeat() time.Time {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.lastHeartbeat
+}
+func (rf *Raft) recoverFromWAL() {
+	entries := rf.wal.LoadAll()
+
+	for _, e := range entries {
+		rf.log = append(rf.log, e)
+	}
+
+	rf.commitIndex = rf.lastApply // 或从 wal meta 恢复
 }
 
 // 获取当前节点在当前任期是否leader
@@ -166,7 +174,7 @@ func (rf *Raft) readPersist(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 
-	var Log []LogEntry
+	var Log []types.LogEntry
 	var Term int32
 	var Vote int32
 	var SnapIndex int32
@@ -298,7 +306,7 @@ func (rf *Raft) broadcastAppendEntries() {
 				return //发快照就不发心跳
 			}
 
-			entries := make([]LogEntry, len(rf.log[next-rf.lastSnapIndex:]))
+			entries := make([]types.LogEntry, len(rf.log[next-rf.lastSnapIndex:]))
 			copy(entries, rf.log[next-rf.lastSnapIndex:])
 
 			args := &HeartbeatArgs{
@@ -421,10 +429,10 @@ func (rf *Raft) AppendEntries(ctx context.Context, args *proto.HeartbeatArgs) (*
 	}
 
 	index := args.PreLogIndex - rf.lastSnapIndex + 1
-	incoming := make([]LogEntry, len(args.Entries))
+	incoming := make([]types.LogEntry, len(args.Entries))
 
 	for i, e := range args.Entries {
-		incoming[i] = LogEntry{
+		incoming[i] = types.LogEntry{
 			Term:    int32(e.Term),
 			Command: e.Command,
 		}
@@ -549,7 +557,7 @@ func (rf *Raft) InstallSnapshot(ctx context.Context, args *proto.InstallSnapshot
 	if args.LastSnapIndex < rf.getLastIndex() {
 		rf.log = rf.log[args.LastSnapIndex-oldSnapIndex:]
 	} else { //丢弃旧log
-		rf.log = []LogEntry{{Term: args.LastSnapTerm}}
+		rf.log = []types.LogEntry{{Term: args.LastSnapTerm}}
 	}
 
 	rf.lastSnapIndex = args.LastSnapIndex
@@ -587,12 +595,19 @@ func (rf *Raft) Start(data []byte) (int32, int32, bool, int64) {
 		return -1, term, isleader, rf.nowLeader
 	} //不是leader不复制
 
-	newcomm := LogEntry{
+	newcomm := types.LogEntry{
+		Index:   index,
 		Term:    rf.term,
 		Command: data,
 	}
 	rf.nowLeader = int64(rf.me)
 	rf.log = append(rf.log, newcomm)
+
+	rf.wal.Append(wal.WalEntry{
+		Index:   int64(newcomm.Index),
+		Term:    int64(newcomm.Term),
+		Command: newcomm.Command,
+	})
 	//	rf.commitIndex++
 	rf.persist()
 	go rf.broadcastAppendEntries()
@@ -738,6 +753,10 @@ func (rf *Raft) ApplyLoop() {
 
 func MakeRaft(applyCh chan ApplyMsg, peers []string, me int32, persister *persister.Persister) *Raft {
 	rf := &Raft{}
+	rf.wal = wal.NewWal("../download")
+	if rf.wal.Exists() {
+		rf.recoverFromWAL()
+	}
 	rf.me = int(me)  //暂时只有一个节点
 	rf.peers = peers //暂时只有一个节点
 	rf.term = 0
@@ -751,6 +770,7 @@ func MakeRaft(applyCh chan ApplyMsg, peers []string, me int32, persister *persis
 	rf.lastApply = 0     //刚开始没有已经执行的日志
 	rf.applyCh = applyCh //与上层kvserver联系的管道
 	rf.snap = persister.ReadSnapshot()
+
 	rf.matchIndex = make([]int32, len(peers))
 	rf.overElectiontime = time.NewTimer(
 		time.Duration(300+rand.Intn(300)) * time.Millisecond,
@@ -761,7 +781,7 @@ func MakeRaft(applyCh chan ApplyMsg, peers []string, me int32, persister *persis
 	}
 	rf.heartbeat = time.NewTimer(50 * time.Millisecond) //固定心跳发送时间
 
-	rf.log = []LogEntry{{}} //dummy节点，log的index从1开始
+	rf.log = []types.LogEntry{{}} //dummy节点，log的index从1开始
 
 	go rf.ApplyLoop() //循环发送要执行的日志给kvserver
 	go rf.ticker()
